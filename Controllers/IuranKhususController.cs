@@ -22,8 +22,10 @@ namespace be.Controllers
             public string JudulIuran { get; set; } = string.Empty;
             public decimal TargetNominalPerSiswa { get; set; }
             public DateTime TanggalMulai { get; set; } = DateTime.UtcNow;
+            /// <summary>Nullable — opsional saat membuat event.</summary>
+            public DateTime? TanggalSelesai { get; set; }
             public string? Keterangan { get; set; }
-            public List<Guid>? SiswaExcluded { get; set; } // ID siswa yang dikecualikan
+            public List<Guid>? SiswaExcluded { get; set; }
         }
 
         // DTO bayar cicilan
@@ -57,6 +59,9 @@ namespace be.Controllers
                 JudulIuran = dto.JudulIuran,
                 TargetNominalPerSiswa = dto.TargetNominalPerSiswa,
                 TanggalMulai = DateTime.SpecifyKind(dto.TanggalMulai, DateTimeKind.Utc),
+                TanggalSelesai = dto.TanggalSelesai.HasValue
+                    ? DateTime.SpecifyKind(dto.TanggalSelesai.Value, DateTimeKind.Utc)
+                    : null,
                 TanggalDibuat = DateTime.UtcNow,
                 Keterangan = dto.Keterangan
             };

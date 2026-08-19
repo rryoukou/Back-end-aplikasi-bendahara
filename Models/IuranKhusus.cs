@@ -21,6 +21,13 @@ namespace be.Models
 
         public DateTime TanggalMulai { get; set; } = DateTime.UtcNow;
 
+        /// <summary>
+        /// Batas waktu pengumpulan iuran (opsional/nullable).
+        /// Hanya berfungsi sebagai indikator deadline — pembayaran/cicilan
+        /// tetap dapat dicatat meskipun tanggal hari ini sudah melewati TanggalSelesai.
+        /// </summary>
+        public DateTime? TanggalSelesai { get; set; }
+
         public DateTime TanggalDibuat { get; set; } = DateTime.UtcNow;
 
         public string? Keterangan { get; set; }
