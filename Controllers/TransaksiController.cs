@@ -160,19 +160,60 @@ namespace be.Controllers
             }
             else
             {
-                // Bulanan: cek apakah sudah bayar bulan ini
-                var result = listSiswa.Select(s =>
+                // Bulanan: bulanPeriode bisa "yyyy" (query per tahun) atau "yyyy-MM" (per bulan).
+                // Jika format "yyyy" → query semua transaksi tahun itu, kembalikan
+                // daftar bulan (int 1-12) yang sudah dibayar.
+                // Jika format "yyyy-MM" → backward compat, kembalikan SudahBayar bool.
+                bool isTahunOnly = bulanPeriode.Length == 4 &&
+                                   int.TryParse(bulanPeriode, out _);
+
+                if (isTahunOnly)
                 {
-                    bool sudahBayar = transaksiPeriode.Any(t => t.SiswaId == s.Id);
-                    return new
+                    // Query semua transaksi yang BulanPeriode di-awali "yyyy-"
+                    var tahunPrefix = bulanPeriode + "-";
+                    var transaksiTahun = await _context.TransaksiKas
+                        .Where(t => t.BulanPeriode != null &&
+                                    t.BulanPeriode.StartsWith(tahunPrefix))
+                        .ToListAsync();
+
+                    var result = listSiswa.Select(s =>
                     {
-                        SiswaId = s.Id,
-                        NamaSiswa = s.Nama,
-                        NoAbsen = s.NoAbsen,
-                        SudahBayar = sudahBayar
-                    };
-                });
-                return Ok(result);
+                        // Ekstrak nomor bulan dari BulanPeriode "yyyy-MM"
+                        var bulanDibayar = transaksiTahun
+                            .Where(t => t.SiswaId == s.Id &&
+                                        t.BulanPeriode != null &&
+                                        t.BulanPeriode.Length == 7)
+                            .Select(t => int.Parse(t.BulanPeriode!.Substring(5, 2)))
+                            .Distinct()
+                            .OrderBy(b => b)
+                            .ToList();
+
+                        return new
+                        {
+                            SiswaId = s.Id,
+                            NamaSiswa = s.Nama,
+                            NoAbsen = s.NoAbsen,
+                            BulanSudahBayar = bulanDibayar
+                        };
+                    });
+                    return Ok(result);
+                }
+                else
+                {
+                    // Backward compat: cek apakah sudah bayar bulan ini
+                    var result = listSiswa.Select(s =>
+                    {
+                        bool sudahBayar = transaksiPeriode.Any(t => t.SiswaId == s.Id);
+                        return new
+                        {
+                            SiswaId = s.Id,
+                            NamaSiswa = s.Nama,
+                            NoAbsen = s.NoAbsen,
+                            SudahBayar = sudahBayar
+                        };
+                    });
+                    return Ok(result);
+                }
             }
         }
 
