@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace be.Models
 {
@@ -7,12 +8,16 @@ namespace be.Models
         [Key]
         public Guid Id { get; set; } = Guid.NewGuid();
 
+        /// <summary>Isolasi data — siswa ini milik bendahara mana.</summary>
+        [Required]
+        public Guid BendaharaId { get; set; }
+
+        [ForeignKey(nameof(BendaharaId))]
+        public Bendahara? Bendahara { get; set; }
+
         [Required]
         public string Nama { get; set; } = string.Empty;
 
-        /// <summary>
-        /// Nomor absen siswa di dalam kelas (wajib diisi, dipakai sebagai urutan list).
-        /// </summary>
         [Required]
         public int NoAbsen { get; set; }
 

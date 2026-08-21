@@ -16,46 +16,65 @@ namespace be.Controllers
             _context = context;
         }
 
-        // DTO buat event
+        private Guid? GetBendaharaId()
+        {
+            if (Request.Headers.TryGetValue("X-Bendahara-Id", out var value) &&
+                Guid.TryParse(value, out var id))
+                return id;
+            return null;
+        }
+
+        // ── DTOs ──────────────────────────────────────────────────────────────
+
         public class CreateEventDto
         {
+            public Guid BendaharaId { get; set; }
             public string JudulIuran { get; set; } = string.Empty;
             public decimal TargetNominalPerSiswa { get; set; }
             public DateTime TanggalMulai { get; set; } = DateTime.UtcNow;
-            /// <summary>Nullable — opsional saat membuat event.</summary>
             public DateTime? TanggalSelesai { get; set; }
             public string? Keterangan { get; set; }
             public List<Guid>? SiswaExcluded { get; set; }
         }
 
-        // DTO bayar cicilan
         public class BayarIuranDto
         {
+            public Guid BendaharaId { get; set; }
             public Guid IuranKhususId { get; set; }
             public Guid SiswaId { get; set; }
             public decimal NominalBayar { get; set; }
         }
 
-        // 1. GET ALL EVENT IURAN KHUSUS
+        // ── 1. GET ALL EVENT ──────────────────────────────────────────────────
+
         [HttpGet]
         public async Task<IActionResult> GetAllEvents()
         {
+            var bendaharaId = GetBendaharaId();
+            if (bendaharaId == null)
+                return BadRequest(new { message = "Header X-Bendahara-Id wajib disertakan." });
+
             var events = await _context.IuranKhususs
+                .Where(i => i.BendaharaId == bendaharaId)
                 .OrderByDescending(i => i.TanggalDibuat)
                 .ToListAsync();
             return Ok(events);
         }
 
-        // 2. POST CREATE EVENT BARU
+        // ── 2. POST CREATE EVENT BARU ─────────────────────────────────────────
+
         [HttpPost]
         public async Task<IActionResult> CreateEvent([FromBody] CreateEventDto dto)
         {
+            if (dto.BendaharaId == Guid.Empty)
+                return BadRequest(new { message = "BendaharaId wajib diisi." });
             if (string.IsNullOrWhiteSpace(dto.JudulIuran) || dto.TargetNominalPerSiswa <= 0)
                 return BadRequest(new { message = "Judul iuran dan target nominal harus diisi!" });
 
             var iuran = new IuranKhusus
             {
                 Id = Guid.NewGuid(),
+                BendaharaId = dto.BendaharaId,
                 JudulIuran = dto.JudulIuran,
                 TargetNominalPerSiswa = dto.TargetNominalPerSiswa,
                 TanggalMulai = DateTime.SpecifyKind(dto.TanggalMulai, DateTimeKind.Utc),
@@ -68,7 +87,6 @@ namespace be.Controllers
 
             _context.IuranKhususs.Add(iuran);
 
-            // Tambahkan exclusion untuk siswa yang dikecualikan
             if (dto.SiswaExcluded != null && dto.SiswaExcluded.Any())
             {
                 foreach (var siswaId in dto.SiswaExcluded)
@@ -84,19 +102,26 @@ namespace be.Controllers
             }
 
             await _context.SaveChangesAsync();
-
             return Ok(new { message = "Event iuran berhasil dibuat!", data = iuran });
         }
 
-        // 3. GET DETAIL PEMBAYARAN EVENT PER SISWA (dengan info exclusion)
+        // ── 3. GET STATUS PEMBAYARAN PER SISWA ───────────────────────────────
+
         [HttpGet("{eventId}/status-siswa")]
         public async Task<IActionResult> GetStatusPembayaran(Guid eventId)
         {
-            var eventInfo = await _context.IuranKhususs.FindAsync(eventId);
-            if (eventInfo == null) return NotFound(new { message = "Event tidak ditemukan" });
+            var bendaharaId = GetBendaharaId();
+            if (bendaharaId == null)
+                return BadRequest(new { message = "Header X-Bendahara-Id wajib disertakan." });
+
+            // Pastikan event milik bendahara yang benar
+            var eventInfo = await _context.IuranKhususs
+                .FirstOrDefaultAsync(i => i.Id == eventId && i.BendaharaId == bendaharaId);
+            if (eventInfo == null)
+                return NotFound(new { message = "Event tidak ditemukan" });
 
             var listSiswa = await _context.Siswas
-                .Where(s => s.IsActive)
+                .Where(s => s.IsActive && s.BendaharaId == bendaharaId)
                 .OrderBy(s => s.NoAbsen)
                 .ToListAsync();
 
@@ -123,7 +148,7 @@ namespace be.Controllers
                     NoAbsen = s.NoAbsen,
                     TotalTerbayar = totalTerbayar,
                     TargetNominal = isDikecualikan ? 0 : eventInfo.TargetNominalPerSiswa,
-                    IsLunas = isDikecualikan ? true : isLunas,
+                    IsLunas = isDikecualikan || isLunas,
                     IsDikecualikan = isDikecualikan
                 };
             });
@@ -131,23 +156,26 @@ namespace be.Controllers
             return Ok(result);
         }
 
-        // 4. POST CATAT PEMBAYARAN / CICILAN IURAN SISWA
+        // ── 4. POST BAYAR CICILAN ─────────────────────────────────────────────
+
         [HttpPost("bayar")]
         public async Task<IActionResult> BayarIuran([FromBody] BayarIuranDto dto)
         {
-            var eventInfo = await _context.IuranKhususs.FindAsync(dto.IuranKhususId);
+            if (dto.BendaharaId == Guid.Empty)
+                return BadRequest(new { message = "BendaharaId wajib diisi." });
+
+            var eventInfo = await _context.IuranKhususs
+                .FirstOrDefaultAsync(i => i.Id == dto.IuranKhususId && i.BendaharaId == dto.BendaharaId);
             if (eventInfo == null) return NotFound(new { message = "Event tidak ditemukan" });
 
             if (dto.NominalBayar <= 0)
                 return BadRequest(new { message = "Nominal bayar harus lebih dari 0!" });
 
-            // Cek apakah siswa dikecualikan
             bool isDikecualikan = await _context.ExclusionIuranSiswas
                 .AnyAsync(e => e.IuranKhususId == dto.IuranKhususId && e.SiswaId == dto.SiswaId);
             if (isDikecualikan)
                 return BadRequest(new { message = "Siswa ini dikecualikan dari event iuran!" });
 
-            // Upsert: tambah cicilan atau buat baru
             var bayar = await _context.PembayaranIuranKhususs
                 .FirstOrDefaultAsync(p => p.IuranKhususId == dto.IuranKhususId && p.SiswaId == dto.SiswaId);
 
@@ -173,7 +201,6 @@ namespace be.Controllers
             }
 
             await _context.SaveChangesAsync();
-
             return Ok(new
             {
                 message = "Pembayaran berhasil dicatat!",
@@ -182,11 +209,17 @@ namespace be.Controllers
             });
         }
 
-        // 5. POST TOGGLE EXCLUSION SISWA DARI EVENT
+        // ── 5. POST TOGGLE EXCLUSION ──────────────────────────────────────────
+
         [HttpPost("{eventId}/exclusion")]
         public async Task<IActionResult> ToggleExclusion(Guid eventId, [FromBody] ToggleExclusionDto dto)
         {
-            var eventInfo = await _context.IuranKhususs.FindAsync(eventId);
+            var bendaharaId = GetBendaharaId();
+            if (bendaharaId == null)
+                return BadRequest(new { message = "Header X-Bendahara-Id wajib disertakan." });
+
+            var eventInfo = await _context.IuranKhususs
+                .FirstOrDefaultAsync(i => i.Id == eventId && i.BendaharaId == bendaharaId);
             if (eventInfo == null) return NotFound(new { message = "Event tidak ditemukan" });
 
             var existing = await _context.ExclusionIuranSiswas

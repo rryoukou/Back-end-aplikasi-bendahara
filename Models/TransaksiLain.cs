@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace be.Models
 {
@@ -7,12 +8,17 @@ namespace be.Models
         [Key]
         public Guid Id { get; set; } = Guid.NewGuid();
 
+        /// <summary>Isolasi data — transaksi ini milik bendahara mana.</summary>
+        [Required]
+        public Guid BendaharaId { get; set; }
+
+        [ForeignKey(nameof(BendaharaId))]
+        public Bendahara? Bendahara { get; set; }
+
         [Required]
         public string Judul { get; set; } = string.Empty;
 
-        /// <summary>
-        /// Tipe: "Pemasukan" atau "Pengeluaran"
-        /// </summary>
+        /// <summary>Tipe: "Pemasukan" atau "Pengeluaran"</summary>
         [Required]
         public string Tipe { get; set; } = "Pengeluaran";
 
@@ -23,9 +29,7 @@ namespace be.Models
 
         public string? Keterangan { get; set; }
 
-        /// <summary>
-        /// Gambar bukti transaksi dalam format Base64 string (nullable).
-        /// </summary>
+        /// <summary>Gambar bukti transaksi dalam format Base64 string (nullable).</summary>
         public string? BuktiFoto { get; set; }
     }
 }

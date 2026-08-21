@@ -16,27 +16,36 @@ namespace be.Controllers
             _context = context;
         }
 
-        // DTO bayar kas batch (mendukung periode spesifik)
-        public class BayarKasBatchDto
+        private Guid? GetBendaharaId()
         {
-            public List<Guid> SiswaIds { get; set; } = new();
-            public decimal Nominal { get; set; }
-            public string? BulanPeriode { get; set; }   // format: "yyyy-MM"
-            public int? MingguKe { get; set; }          // 1-4 (untuk mode Mingguan)
-            public string? TanggalBayarSpec { get; set; } // "yyyy-MM-dd" (untuk mode Harian)
+            if (Request.Headers.TryGetValue("X-Bendahara-Id", out var value) &&
+                Guid.TryParse(value, out var id))
+                return id;
+            return null;
         }
 
-        // DTO transaksi lain dengan bukti foto
+        // ── DTOs ──────────────────────────────────────────────────────────────
+
+        public class BayarKasBatchDto
+        {
+            public Guid BendaharaId { get; set; }
+            public List<Guid> SiswaIds { get; set; } = new();
+            public decimal Nominal { get; set; }
+            public string? BulanPeriode { get; set; }
+            public int? MingguKe { get; set; }
+            public string? TanggalBayarSpec { get; set; }
+        }
+
         public class TransaksiLainDto
         {
+            public Guid BendaharaId { get; set; }
             public string Judul { get; set; } = string.Empty;
             public string Tipe { get; set; } = "Pengeluaran";
             public decimal Nominal { get; set; }
             public string? Keterangan { get; set; }
-            public string? BuktiFoto { get; set; } // Base64 string
+            public string? BuktiFoto { get; set; }
         }
 
-        // DTO item riwayat untuk response
         public class RiwayatItemDto
         {
             public Guid Id { get; set; }
@@ -48,43 +57,44 @@ namespace be.Controllers
             public string? BuktiFotoUrl { get; set; }
         }
 
-        // POST: api/Transaksi/bayar-kas-batch
+        // ── POST: bayar-kas-batch ─────────────────────────────────────────────
+
         [HttpPost("bayar-kas-batch")]
         public async Task<IActionResult> BayarKasBatch([FromBody] BayarKasBatchDto dto)
         {
+            if (dto.BendaharaId == Guid.Empty)
+                return BadRequest(new { message = "BendaharaId wajib diisi." });
             if (dto.SiswaIds == null || !dto.SiswaIds.Any())
                 return BadRequest(new { message = "Pilih minimal 1 siswa!" });
 
             var listTransaksi = new List<TransaksiKas>();
             foreach (var siswaId in dto.SiswaIds)
             {
-                // Cek apakah periode ini sudah dibayar (hindari double payment)
                 if (!string.IsNullOrEmpty(dto.BulanPeriode))
                 {
                     bool sudahBayar = false;
-
                     if (dto.TanggalBayarSpec != null)
                     {
-                        // Mode Harian: cek per tanggal spesifik
                         sudahBayar = await _context.TransaksiKas.AnyAsync(t =>
+                            t.BendaharaId == dto.BendaharaId &&
                             t.SiswaId == siswaId &&
                             t.BulanPeriode == dto.BulanPeriode &&
                             t.TanggalBayarSpec == dto.TanggalBayarSpec);
                     }
                     else if (dto.MingguKe != null)
                     {
-                        // Mode Mingguan: cek per minggu
                         sudahBayar = await _context.TransaksiKas.AnyAsync(t =>
+                            t.BendaharaId == dto.BendaharaId &&
                             t.SiswaId == siswaId &&
                             t.BulanPeriode == dto.BulanPeriode &&
                             t.MingguKe == dto.MingguKe);
                     }
-
-                    if (sudahBayar) continue; // skip siswa yang sudah bayar periode ini
+                    if (sudahBayar) continue;
                 }
 
                 listTransaksi.Add(new TransaksiKas
                 {
+                    BendaharaId = dto.BendaharaId,
                     SiswaId = siswaId,
                     Nominal = dto.Nominal,
                     TanggalBayar = DateTime.UtcNow,
@@ -100,133 +110,110 @@ namespace be.Controllers
 
             _context.TransaksiKas.AddRange(listTransaksi);
             await _context.SaveChangesAsync();
-
             return Ok(new { message = $"Berhasil mencatat kas untuk {listTransaksi.Count} siswa!" });
         }
 
-        // GET: api/Transaksi/status-kas?bulanPeriode=2026-08&tipeJadwal=Mingguan
-        // Mengambil status bayar per siswa untuk periode tertentu
+        // ── GET: status-kas ───────────────────────────────────────────────────
+
         [HttpGet("status-kas")]
         public async Task<IActionResult> GetStatusKas(
             [FromQuery] string bulanPeriode,
             [FromQuery] string tipeJadwal = "Mingguan")
         {
+            var bendaharaId = GetBendaharaId();
+            if (bendaharaId == null)
+                return BadRequest(new { message = "Header X-Bendahara-Id wajib disertakan." });
+
             var listSiswa = await _context.Siswas
-                .Where(s => s.IsActive)
+                .Where(s => s.IsActive && s.BendaharaId == bendaharaId)
                 .OrderBy(s => s.NoAbsen)
                 .ToListAsync();
 
             var transaksiPeriode = await _context.TransaksiKas
-                .Where(t => t.BulanPeriode == bulanPeriode)
+                .Where(t => t.BendaharaId == bendaharaId && t.BulanPeriode == bulanPeriode)
                 .ToListAsync();
 
             if (tipeJadwal == "Mingguan")
             {
-                var result = listSiswa.Select(s =>
+                var result = listSiswa.Select(s => new
                 {
-                    var dibayar = transaksiPeriode
+                    SiswaId = s.Id,
+                    NamaSiswa = s.Nama,
+                    NoAbsen = s.NoAbsen,
+                    MingguSudahBayar = transaksiPeriode
                         .Where(t => t.SiswaId == s.Id && t.MingguKe != null)
-                        .Select(t => t.MingguKe!.Value)
-                        .ToList();
-
-                    return new
-                    {
-                        SiswaId = s.Id,
-                        NamaSiswa = s.Nama,
-                        NoAbsen = s.NoAbsen,
-                        MingguSudahBayar = dibayar
-                    };
+                        .Select(t => t.MingguKe!.Value).ToList()
                 });
                 return Ok(result);
             }
             else if (tipeJadwal == "Harian")
             {
-                var result = listSiswa.Select(s =>
+                var result = listSiswa.Select(s => new
                 {
-                    var dibayar = transaksiPeriode
+                    SiswaId = s.Id,
+                    NamaSiswa = s.Nama,
+                    NoAbsen = s.NoAbsen,
+                    TanggalSudahBayar = transaksiPeriode
                         .Where(t => t.SiswaId == s.Id && t.TanggalBayarSpec != null)
-                        .Select(t => t.TanggalBayarSpec!)
-                        .ToList();
-
-                    return new
-                    {
-                        SiswaId = s.Id,
-                        NamaSiswa = s.Nama,
-                        NoAbsen = s.NoAbsen,
-                        TanggalSudahBayar = dibayar
-                    };
+                        .Select(t => t.TanggalBayarSpec!).ToList()
                 });
                 return Ok(result);
             }
             else
             {
-                // Bulanan: bulanPeriode bisa "yyyy" (query per tahun) atau "yyyy-MM" (per bulan).
-                // Jika format "yyyy" → query semua transaksi tahun itu, kembalikan
-                // daftar bulan (int 1-12) yang sudah dibayar.
-                // Jika format "yyyy-MM" → backward compat, kembalikan SudahBayar bool.
-                bool isTahunOnly = bulanPeriode.Length == 4 &&
-                                   int.TryParse(bulanPeriode, out _);
+                bool isTahunOnly = bulanPeriode.Length == 4 && int.TryParse(bulanPeriode, out _);
 
                 if (isTahunOnly)
                 {
-                    // Query semua transaksi yang BulanPeriode di-awali "yyyy-"
                     var tahunPrefix = bulanPeriode + "-";
                     var transaksiTahun = await _context.TransaksiKas
-                        .Where(t => t.BulanPeriode != null &&
+                        .Where(t => t.BendaharaId == bendaharaId &&
+                                    t.BulanPeriode != null &&
                                     t.BulanPeriode.StartsWith(tahunPrefix))
                         .ToListAsync();
 
-                    var result = listSiswa.Select(s =>
+                    var result = listSiswa.Select(s => new
                     {
-                        // Ekstrak nomor bulan dari BulanPeriode "yyyy-MM"
-                        var bulanDibayar = transaksiTahun
+                        SiswaId = s.Id,
+                        NamaSiswa = s.Nama,
+                        NoAbsen = s.NoAbsen,
+                        BulanSudahBayar = transaksiTahun
                             .Where(t => t.SiswaId == s.Id &&
                                         t.BulanPeriode != null &&
                                         t.BulanPeriode.Length == 7)
                             .Select(t => int.Parse(t.BulanPeriode!.Substring(5, 2)))
-                            .Distinct()
-                            .OrderBy(b => b)
-                            .ToList();
-
-                        return new
-                        {
-                            SiswaId = s.Id,
-                            NamaSiswa = s.Nama,
-                            NoAbsen = s.NoAbsen,
-                            BulanSudahBayar = bulanDibayar
-                        };
+                            .Distinct().OrderBy(b => b).ToList()
                     });
                     return Ok(result);
                 }
                 else
                 {
-                    // Backward compat: cek apakah sudah bayar bulan ini
-                    var result = listSiswa.Select(s =>
+                    var result = listSiswa.Select(s => new
                     {
-                        bool sudahBayar = transaksiPeriode.Any(t => t.SiswaId == s.Id);
-                        return new
-                        {
-                            SiswaId = s.Id,
-                            NamaSiswa = s.Nama,
-                            NoAbsen = s.NoAbsen,
-                            SudahBayar = sudahBayar
-                        };
+                        SiswaId = s.Id,
+                        NamaSiswa = s.Nama,
+                        NoAbsen = s.NoAbsen,
+                        SudahBayar = transaksiPeriode.Any(t => t.SiswaId == s.Id)
                     });
                     return Ok(result);
                 }
             }
         }
 
-        // POST: api/Transaksi/transaksi-lain
+        // ── POST: transaksi-lain ──────────────────────────────────────────────
+
         [HttpPost("transaksi-lain")]
         public async Task<IActionResult> CreateTransaksiLain([FromBody] TransaksiLainDto dto)
         {
+            if (dto.BendaharaId == Guid.Empty)
+                return BadRequest(new { message = "BendaharaId wajib diisi." });
             if (string.IsNullOrWhiteSpace(dto.Judul) || dto.Nominal <= 0)
                 return BadRequest(new { message = "Judul dan nominal harus diisi dengan benar!" });
 
             var transaksi = new TransaksiLain
             {
                 Id = Guid.NewGuid(),
+                BendaharaId = dto.BendaharaId,
                 Judul = dto.Judul,
                 Tipe = dto.Tipe,
                 Nominal = dto.Nominal,
@@ -237,40 +224,81 @@ namespace be.Controllers
 
             _context.TransaksiLains.Add(transaksi);
             await _context.SaveChangesAsync();
-
             return Ok(new { message = "Transaksi berhasil disimpan!" });
         }
 
-        // GET: api/Transaksi/total-saldo
+        // ── GET: total-saldo (legacy) ─────────────────────────────────────────
+
         [HttpGet("total-saldo")]
         public async Task<IActionResult> GetTotalSaldo()
         {
-            var totalKas = await _context.TransaksiKas.SumAsync(t => (decimal?)t.Nominal) ?? 0;
-            var totalPemasukanLain = await _context.TransaksiLains
-                .Where(t => t.Tipe == "Pemasukan")
+            var bendaharaId = GetBendaharaId();
+            if (bendaharaId == null)
+                return BadRequest(new { message = "Header X-Bendahara-Id wajib disertakan." });
+
+            var totalKas = await _context.TransaksiKas
+                .Where(t => t.BendaharaId == bendaharaId)
                 .SumAsync(t => (decimal?)t.Nominal) ?? 0;
-            var totalPengeluaran = await _context.TransaksiLains
-                .Where(t => t.Tipe == "Pengeluaran")
+            var totalMasuk = await _context.TransaksiLains
+                .Where(t => t.BendaharaId == bendaharaId && t.Tipe == "Pemasukan")
+                .SumAsync(t => (decimal?)t.Nominal) ?? 0;
+            var totalKeluar = await _context.TransaksiLains
+                .Where(t => t.BendaharaId == bendaharaId && t.Tipe == "Pengeluaran")
                 .SumAsync(t => (decimal?)t.Nominal) ?? 0;
 
-            var saldoAkhir = (totalKas + totalPemasukanLain) - totalPengeluaran;
-
-            return Ok(new { totalSaldo = saldoAkhir });
+            return Ok(new { totalSaldo = (totalKas + totalMasuk) - totalKeluar });
         }
 
-        // GET: api/Transaksi/riwayat?page=1&pageSize=10&filter=Semua
+        // ── GET: summary (baru) ───────────────────────────────────────────────
+        // GET /api/Transaksi/summary?bendaharaId={id}
+
+        [HttpGet("summary")]
+        public async Task<IActionResult> GetSummary([FromQuery] Guid bendaharaId)
+        {
+            if (bendaharaId == Guid.Empty)
+                return BadRequest(new { message = "bendaharaId wajib disertakan." });
+
+            var totalKas = await _context.TransaksiKas
+                .Where(t => t.BendaharaId == bendaharaId)
+                .SumAsync(t => (decimal?)t.Nominal) ?? 0;
+
+            var totalMasuk = await _context.TransaksiLains
+                .Where(t => t.BendaharaId == bendaharaId && t.Tipe == "Pemasukan")
+                .SumAsync(t => (decimal?)t.Nominal) ?? 0;
+
+            var totalKeluar = await _context.TransaksiLains
+                .Where(t => t.BendaharaId == bendaharaId && t.Tipe == "Pengeluaran")
+                .SumAsync(t => (decimal?)t.Nominal) ?? 0;
+
+            // Pemasukan = kas rutin + pemasukan lain
+            var totalPemasukan = totalKas + totalMasuk;
+            var totalSaldo = totalPemasukan - totalKeluar;
+
+            return Ok(new
+            {
+                totalSaldo,
+                totalPemasukan,
+                totalPengeluaran = totalKeluar
+            });
+        }
+
+        // ── GET: riwayat ──────────────────────────────────────────────────────
+
         [HttpGet("riwayat")]
         public async Task<IActionResult> GetRiwayat(
             [FromQuery] int page = 1,
             [FromQuery] int pageSize = 10,
-            [FromQuery] string filter = "Semua",   // "Semua", "Masuk", "Keluar"
-            [FromQuery] int limit = 0)             // backward compat
+            [FromQuery] string filter = "Semua",
+            [FromQuery] int limit = 0)
         {
-            // Support legacy ?limit=N parameter
+            var bendaharaId = GetBendaharaId();
+            if (bendaharaId == null)
+                return BadRequest(new { message = "Header X-Bendahara-Id wajib disertakan." });
+
             if (limit > 0 && pageSize == 10) pageSize = limit;
 
-            // Ambil Kas Rutin Siswa
             var listKas = await _context.TransaksiKas
+                .Where(t => t.BendaharaId == bendaharaId)
                 .Include(t => t.Siswa)
                 .Select(t => new RiwayatItemDto
                 {
@@ -284,8 +312,8 @@ namespace be.Controllers
                 })
                 .ToListAsync();
 
-            // Ambil Transaksi Lain
             var listLain = await _context.TransaksiLains
+                .Where(t => t.BendaharaId == bendaharaId)
                 .Select(t => new RiwayatItemDto
                 {
                     Id = t.Id,
@@ -298,32 +326,20 @@ namespace be.Controllers
                 })
                 .ToListAsync();
 
-            // Gabungkan
             var gabungan = listKas.Concat(listLain)
                 .OrderByDescending(t => t.Tanggal)
                 .AsQueryable();
 
-            // Filter
-            if (filter == "Masuk")
-                gabungan = gabungan.Where(t => t.Tipe == "Masuk");
-            else if (filter == "Keluar")
-                gabungan = gabungan.Where(t => t.Tipe == "Keluar");
+            if (filter == "Masuk") gabungan = gabungan.Where(t => t.Tipe == "Masuk");
+            else if (filter == "Keluar") gabungan = gabungan.Where(t => t.Tipe == "Keluar");
 
             var totalCount = gabungan.Count();
 
-            // Pagination (skip jika limit > 0 untuk backward compat)
             List<RiwayatItemDto> result;
             if (limit > 0)
-            {
                 result = gabungan.Take(limit).ToList();
-            }
             else
-            {
-                result = gabungan
-                    .Skip((page - 1) * pageSize)
-                    .Take(pageSize)
-                    .ToList();
-            }
+                result = gabungan.Skip((page - 1) * pageSize).Take(pageSize).ToList();
 
             return Ok(new
             {
